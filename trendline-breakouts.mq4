@@ -13,3 +13,19 @@ on initialisation:
       2B. get the currency's closest lower trend line
 
    3. get bank balance for portfolio risk
+
+on start:
+
+   0. every tick
+
+      0A. check if active, if so, check trailing stop
+
+   1. every bar
+
+      1A. if trend is up, get significant upper trend line
+
+      1B. if trend is down, get significant lower trend line
+
+   2. every day
+
+      2A. get trend
