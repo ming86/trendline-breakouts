@@ -29,3 +29,7 @@ on start:
    2. every day
 
       2A. get trend
+
+on deinitialise:
+
+   1. send email alert - get last error code
