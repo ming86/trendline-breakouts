@@ -10,18 +10,33 @@ extern int EXT_SUP_COLOR = PaleGreen; // horizontal support line http://docs.mql
 extern int EXT_SLOPE_RES_COLOR = LightSalmon; // sloping resistance line http://docs.mql4.com/constants/colors
 extern int EXT_SLOPE_SUP_COLOR = Lime; // sloping support line http://docs.mql4.com/constants/colors
 
+datetime NOWPER;
+
+int init() {
+   // remove all previous trend lines and plots
+   ObjectsDeleteAll( 0 );
+
+   return( 0 );
+}
 
 int start() {
    string sym = Symbol();
    int per = Period();
    int d = Digits;
-   ObjectsDeleteAll( 0 );
+   datetime t = iTime( sym, per, 0 );
 
-   double tlUp = getTrendLine( sym, per, true );
-   double tlDn = getTrendLine( sym, per, false );
+   // only do at the change of every bar
+   if ( t != NOWPER ) {
 
-   // let's comment the values of the trend line to see what their price is
-   Comment( "tlUp=" + DoubleToStr( tlUp, d ) + "  tlDn=" + DoubleToStr( tlDn, d ) );
+      double tlUp = getTrendLine( sym, per, true );
+      double tlDn = getTrendLine( sym, per, false );
+
+      // let's comment the values of the trend line to see what their price is
+      Comment( "tlUp=" + DoubleToStr( tlUp, d ) + "  tlDn=" + DoubleToStr( tlDn, d ) );
+
+      NOWPER = t;
+
+   }
 
    return( 0 );
 }
