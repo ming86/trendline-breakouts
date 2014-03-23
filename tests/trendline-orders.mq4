@@ -9,7 +9,8 @@ extern int EXT_MAX_SLIP = 10; // maximum points of slippage allowed for order 10
 extern double EXT_ATR_TRAILSTOP = 2; // multiple for trailing the market ATR(EXT_ATR) * X
 
 // global variables
-bool GATE_ACTIVE;
+int GATE_ACTIVE, TRADE_TKT;
+double EXIT_PRICE, TRADE_LOTS;
 
 //+------------------------------------------------------------------+
 //| expert initialization function                                   |
@@ -41,10 +42,18 @@ int start()
 //----
 	string sym = Symbol();
 	int per = Period();
-	if ( !GATE_ACTIVE ) {
+	if ( GATE_ACTIVE == -1 ) {
 	  if ( Bid > iHigh( sym, per, 1 ) + iATR( sym, per, EXT_ATR, 1 ) ) doBuy( sym, per );
 	  if ( Ask < iLow( sym, per, 1 ) - iATR( sym, per, EXT_ATR, 1 ) ) doSell( sym, per );
 	} else {
+		// first we'll check to see if the exit price has been hit
+		// LONG trades
+		if ( GATE_ACTIVE == OP_BUY && EXIT_PRICE > Bid && EXIT_PRICE > 0 ) 
+			exitNow( sym, TRADE_TKT, TRADE_LOTS, Bid );
+		// SHORT trades
+		if ( GATE_ACTIVE == OP_SELL && Ask > EXIT_PRICE && EXIT_PRICE > 0 ) 
+			exitNow( sym, TRADE_TKT, TRADE_LOTS, Ask );
+
 		// if the gate is active let's analyse whether it's stop loss needs amending
 		GATE_ACTIVE = isActive( sym, true );
 	}
@@ -88,6 +97,8 @@ int doSell( string sym, int per ) {
 		if ( tkt > 0 ) {
 			// change the active currency's GATE_ACTIVE flag to true
 			GATE_ACTIVE = true;
+			// set global exit price
+			EXIT_PRICE = exit;
 			// our entry order has been placed let's now notify ourselves of the order
 			SendMail( "NEW SELL Order " + sym, 
 				"Entry = " + D( entry ) + "\n" +
@@ -136,6 +147,8 @@ int doBuy( string sym, int per ) {
 		// submit AT MARKET entry order
 		tkt = OrderSend( sym, OP_BUY, lots, entry, EXT_MAX_SLIP, exit, magic, VERSION, expy, 0 ); 
 		if ( tkt > 0 ) {
+			GATE_ACTIVE = true;
+			EXIT_PRICE = exit;
 			SendMail( "NEW BUY Order for " + sym, 
 				"Entry = " + D( entry ) + "\n" +
 				"StopLoss = " + D( exit ) + "\n" +
@@ -147,7 +160,6 @@ int doBuy( string sym, int per ) {
 				"LLV = " + D( iLow( sym, per, iLowest( sym, per, MODE_LOW, EXT_LOOKBACK, 0 ) ) ) + "\n" +
 				"Version = " + VERSION
 			);
-			GATE_ACTIVE = true;
 		} else if ( tkt == -1 ) {
 			if ( GetLastError() > 0 ) {
 				SendMail( "ERR with NEW BUY Order for " + sym,
@@ -247,7 +259,7 @@ string D( double d, int dig = 0 ) {
 }
 
 // check if the symbol currently has an open position
-bool isActive( string sym, bool checkStop ) {
+int isActive( string sym, bool checkStop ) {
 	int tots = OrdersTotal();
 	double stop;
 	for ( int i = tots; i >= 0; i -= 1 ) {
@@ -259,15 +271,15 @@ bool isActive( string sym, bool checkStop ) {
 					// notice here how when we stored the OrderMagicNumber we used it to store the Period
 					// the purpose of this is to help us differentiate what time period was used in case we
 					// use multiple time frames for this EA on the same currency
-					stop = getTrailingStop( sym, OrderOpenPrice(), OrderStopLoss(), OrderOpenTime(), OrderMagicNumber(), OrderType() );
-					// if the stop is different to the current orders' stop loss we will amend accordingly
-					if ( stop != OrderStopLoss() ) amendStop( sym, OrderTicket(), OrderOpenPrice(), stop, OrderType(), OrderLots() );									
+					EXIT_PRICE = getTrailingStop( sym, OrderOpenPrice(), OrderStopLoss(), OrderOpenTime(), OrderMagicNumber(), OrderType() );
+					TRADE_TKT = OrderTicket();
+					TRADE_LOTS = OrderLots();
 				}
-				return ( true );
+				return ( OrderType() );
 			}
 		}
 	}
-	return ( false );
+	return ( -1 );
 }
 
 // this function requires the following parameters:
@@ -289,7 +301,7 @@ double getTrailingStop( string sym, double op, double sl, datetime ot, int per, 
 	// our logic by checking if the current bar is less than or equal to the current bar
 	// if it is, then the current bar *IS* the bar of entry.
 	if ( iTime( sym, per, 0 ) <= ot ) {
-		temp = getMinutePrice( sym, ot, sl, type );
+		temp = getMinutePrice( sym, ot, type );
 		if ( type == OP_BUY && temp > result ) result = temp - atr;
 		if ( type == OP_SELL && temp < result ) result = temp + atr;
 	}
@@ -326,7 +338,7 @@ double getTrailingStop( string sym, double op, double sl, datetime ot, int per, 
 // sym = currency's symbol
 // ot = opening datetime of the trade
 // type = order type of the trade
-function getMinutePrice( string sym, datetime ot, int type ) {
+double getMinutePrice( string sym, datetime ot, int type ) {
 	int per = PERIOD_M1;
 	int b = iBars( sym, per );
 	// better to start with a value, rather than 0
@@ -341,48 +353,58 @@ function getMinutePrice( string sym, datetime ot, int type ) {
 	return ( result );
 }
 
-
-// this function will amend the active order, but needs the following params:
-// sym = currency symbol
-// tkt = current orders' ticket number
-// op = current orders' opening price
-// sl = stop price to amend to
-// type = order type
-// lots = current orders' lot size
-bool amendStop( string sym, int tkt, double op, double sl, int type, double lots ) {
-	// check whether we can make an amendment
-	int trade = checkIsTradeAllowed();
-	if ( trade == 0 ) RefreshRates();
-	if ( trade > 0 ) {
-		// check if the amending of our long order is greater the bid price, if so exit at market
-		if ( type == OP_BUY && sl > Bid ) {
-			return( exitNow( sym, tkt, lots, type ) );
-		// check if the amending of our short order is less than the ask price, if so exit at market
-		} else if ( type == OP_SELL && sl < Ask ) {
-			return( exitNow( sym, tkt, lots, type ) );
-		// otherwise modify order accordingly
-		} else {
-			return( OrderModify( tkt, op, sl, 0, 0 ) );	
-		}		
-	}
-	// if no modification has been made return false
-	return( false );
-}
-
 // this function exits at market, but needs the following params:
 // sym = currency symbol
-// tkt = order's ticket number
-// lots = order's lot size
-// type = order's type (eg. OP_BUY, OP_SELL)
-bool exitNow( string sym, int tkt, double lots, int type ) {
+// tkt = trades' ticket number
+// lots = trades' lot size
+// p = price to exit at
+bool exitNow( string sym, int tkt, double lots, double p ) {
 	// check if it's okay to exit trade
 	int trade = checkIsTradeAllowed();
-	double p;
-	// get refreshed prices
-	if ( type == OP_BUY ) p = MarketInfo( sym, MODE_ASK );
-	if ( type == OP_SELL ) p = MarketInfo( sym, MODE_BID );
 	// place trade if ok to place order
-	if ( trade > 0 ) return( OrderClose( tkt, lots, p, EXT_MAX_SLIP ) );
+	if ( trade > 0 ) {
+		if ( OrderClose( tkt, lots, p, EXT_MAX_SLIP ) ) {
+			// trade has successfuly closed
+			EXIT_PRICE = 0;
+			// let's now loop through the historical trades and obtain some data to return
+			int t = OrdersHistoryTotal();
+			for ( int i = t; i >= 0; i -= 1 ) {
+				if ( OrderSelect( i, SELECT_BY_POS, MODE_HISTORY ) ) {
+					if ( OrderTicket() == tkt ) {
+						double op = OrderOpenPrice();
+						datetime ot = OrderOpenTime();
+						double sl = OrderStopLoss();
+						double pr = OrderProfit();
+						int typ = OrderType();
+						string d;
+						if ( typ == 0 ) d = "LONG";
+						if ( typ == 1 ) d = "SHORT";
+						double cp = OrderClosePrice();
+						datetime ct = OrderCloseTime();
+						int mag = OrderMagicNumber();
+						double comm = OrderCommission();
+						double swap = OrderSwap();
+						break;
+					}
+				}
+			}
+			// Send alerts
+			SendMail( "EXIT of " + d + " for " + sym, 
+				"PROFIT/LOSS = " + D( pr, 2 ) + "\n" +
+				"ALERT price = " + D( p ) + "\n" +
+				"CLOSE price = " + D( cp ) + "\n" +
+				"CLOSE time = " + TimeToStr( ct ) + "\n" +
+				"COMMISSION charged = " + D( comm, 2 ) + "\n" +
+				"SWAP charges = " + D( swap, 2 ) + "\n" +
+				"\n" +
+				"OPEN price = " + D( op ) + "\n" +
+				"OPEN time = " + TimeToStr( ot ) + "\n" +
+				"MAGIC number = " + mag + "\n" +
+				"STOP LOSS = " + D( sl ) + "\n"
+			);
+			return( true );
+		}
+	}
 	// if this has failed return false
 	return( false );
 }
