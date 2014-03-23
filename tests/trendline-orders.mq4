@@ -6,6 +6,7 @@ extern int EXT_LOOKBACK = 3; // number of bars to find highest high/lowest low
 extern double EXT_RISK_MINAMT = 50; // dollar value of the minimum amount to risk per trade
 extern double EXT_RISK_DIVISOR = 10; // AccountBalance/X = risk per trade
 extern int EXT_MAX_SLIP = 10; // maximum points of slippage allowed for order 10 = 1 pip
+extern double EXT_ATR_TRAILSTOP = 2; // multiple for trailing the market ATR(EXT_ATR) * X
 
 // global variables
 bool GATE_ACTIVE;
@@ -43,6 +44,9 @@ int start()
 	if ( !GATE_ACTIVE ) {
 	  if ( Bid > iHigh( sym, per, 1 ) + iATR( sym, per, EXT_ATR, 1 ) ) doBuy( sym, per );
 	  if ( Ask < iLow( sym, per, 1 ) - iATR( sym, per, EXT_ATR, 1 ) ) doSell( sym, per );
+	} else {
+		// if the gate is active let's analyse whether it's stop loss needs amending
+		GATE_ACTIVE = isActive( sym, true );
 	}
 //----
    return(0);
@@ -236,15 +240,28 @@ double getLots( string sym, double entry, double stop, double risk ) {
 	return( N( result, 2 ) ); 
 }
  
+// shortcut function to convert double to string
+string D( double d, int dig = 0 ) {
+	if ( dig == 0 ) dig = Digits;
+	return( DoubleToStr( d, dig ) );
+}
+
 // check if the symbol currently has an open position
 bool isActive( string sym, bool checkStop ) {
 	int tots = OrdersTotal();
+	double stop;
 	for ( int i = tots; i >= 0; i -= 1 ) {
 		if ( OrderSelect( i, SELECT_BY_POS, MODE_TRADES ) ) {
 			if ( OrderSymbol() == sym ) {
 				// check if we are checking the trailing stop on an active order
 				if ( checkStop && OrderType() < 2 ) { 
-					// this will be done when we write up our details on exits
+					// as we are checking stops let's check this one
+					// notice here how when we stored the OrderMagicNumber we used it to store the Period
+					// the purpose of this is to help us differentiate what time period was used in case we
+					// use multiple time frames for this EA on the same currency
+					stop = getTrailingStop( sym, OrderOpenPrice(), OrderStopLoss(), OrderOpenTime(), OrderMagicNumber(), OrderType() );
+					// if the stop is different to the current orders' stop loss we will amend accordingly
+					if ( stop != OrderStopLoss() ) amendStop( sym, OrderTicket(), OrderOpenPrice(), stop, OrderType(), OrderLots() );									
 				}
 				return ( true );
 			}
@@ -253,10 +270,119 @@ bool isActive( string sym, bool checkStop ) {
 	return ( false );
 }
 
-
-// shortcut function to convert double to string
-string D( double d, int dig = 0 ) {
-	if ( dig == 0 ) dig = Digits;
-	return( DoubleToStr( d, dig ) );
+// this function requires the following parameters:
+// sym = currency
+// op = opening price of the current trade
+// sl = stop loss price of the current trade
+// ot = opening datetime of the current trade
+// per = active chart's period - for calculating ATR distance properly
+// type = order type of the current trade
+double getTrailingStop( string sym, double op, double sl, datetime ot, int per, int type ) {
+	double temp;	
+	// make the result for this function initially equal the stop loss
+	double result = sl;	
+	// calculate the trailing stop distance
+	double atr = iATR( sym, per, EXT_ATR, 1 ) * EXT_ATR_TRAILSTOP;
+	// check if we are operating in the bar of entry, if so move to minute charts to find out
+	// what the highest high or lowest low is since entry (rather than using the whole bar)
+	// As Pepperstone timestamp their bars with the opening time of that bar we can frame
+	// our logic by checking if the current bar is less than or equal to the current bar
+	// if it is, then the current bar *IS* the bar of entry.
+	if ( iTime( sym, per, 0 ) <= ot ) {
+		temp = getMinutePrice( sym, ot, sl, type );
+		if ( type == OP_BUY && temp > result ) result = temp - atr;
+		if ( type == OP_SELL && temp < result ) result = temp + atr;
+	}
+	// get bars of current periods' chart	
+	int b = iBars( sym, per );	
+	// let's loop through the bars now, starting with the most recent bar
+	for ( int i = 0; i < b; i += 1 ) {
+		// if the time of the active chart is LESS than the time of when the trade opened, end
+		if ( iTime( sym, per, i ) < ot ) break;
+		// calculate the ATR trailing distance - using active chart's period
+		// and always using the previous bar's ATR as the current bar is still
+		// forming
+		atr = iATR( sym, per, EXT_ATR, i+1 ) * EXT_ATR_TRAILSTOP;
+		// for long trades
+		if ( type == OP_BUY ) {
+			// using the high of the minute chart subtract the ATR distance
+			temp = iHigh( sym, per, i ) - atr;
+			// compare against the current best result, and if it is better modify result
+			if ( temp > result ) result = temp;
+		// for short trades
+		} else if ( type == OP_SELL ) {
+			// using the low of the minute chart add the ATR distance
+			temp = iLow( sym, per, i ) + atr;
+			// compare against the current best result, and if it is better modify result
+			if ( temp < result ) result = temp;
+		}
+	}
+	// return the result, normalizing the double
+	return ( N( result ) );
 }
 
+// this function will return the highest high or lowest low in the minute chart
+// parameters of this function: 
+// sym = currency's symbol
+// ot = opening datetime of the trade
+// type = order type of the trade
+function getMinutePrice( string sym, datetime ot, int type ) {
+	int per = PERIOD_M1;
+	int b = iBars( sym, per );
+	// better to start with a value, rather than 0
+	double result = iClose( sym, per, 0 );
+	for ( int i = 0; i < b; i += 1 ) {
+		// once the active bar is less than the opening time then we are analysing
+		// bars PRIOR to entry, therefore exit
+		if ( iTime( sym, per, i ) < ot ) break;
+		if ( type == OP_BUY && iHigh( sym, per, i ) > result ) result = iHigh( sym, per, i );
+		if ( type == OP_SELL && iLow( sym, per, i ) < result ) result = iLow( sym, per, i );
+	}
+	return ( result );
+}
+
+
+// this function will amend the active order, but needs the following params:
+// sym = currency symbol
+// tkt = current orders' ticket number
+// op = current orders' opening price
+// sl = stop price to amend to
+// type = order type
+// lots = current orders' lot size
+bool amendStop( string sym, int tkt, double op, double sl, int type, double lots ) {
+	// check whether we can make an amendment
+	int trade = checkIsTradeAllowed();
+	if ( trade == 0 ) RefreshRates();
+	if ( trade > 0 ) {
+		// check if the amending of our long order is greater the bid price, if so exit at market
+		if ( type == OP_BUY && sl > Bid ) {
+			return( exitNow( sym, tkt, lots, type ) );
+		// check if the amending of our short order is less than the ask price, if so exit at market
+		} else if ( type == OP_SELL && sl < Ask ) {
+			return( exitNow( sym, tkt, lots, type ) );
+		// otherwise modify order accordingly
+		} else {
+			return( OrderModify( tkt, op, sl, 0, 0 ) );	
+		}		
+	}
+	// if no modification has been made return false
+	return( false );
+}
+
+// this function exits at market, but needs the following params:
+// sym = currency symbol
+// tkt = order's ticket number
+// lots = order's lot size
+// type = order's type (eg. OP_BUY, OP_SELL)
+bool exitNow( string sym, int tkt, double lots, int type ) {
+	// check if it's okay to exit trade
+	int trade = checkIsTradeAllowed();
+	double p;
+	// get refreshed prices
+	if ( type == OP_BUY ) p = MarketInfo( sym, MODE_ASK );
+	if ( type == OP_SELL ) p = MarketInfo( sym, MODE_BID );
+	// place trade if ok to place order
+	if ( trade > 0 ) return( OrderClose( tkt, lots, p, EXT_MAX_SLIP ) );
+	// if this has failed return false
+	return( false );
+}
