@@ -384,6 +384,9 @@ bool exitNow( string sym, int tkt, double lots, double p ) {
 						int mag = OrderMagicNumber();
 						double comm = OrderCommission();
 						double swap = OrderSwap();
+						double slip;
+						if ( typ == OP_BUY ) slip = cp - p;
+						if ( typ == OP_SELL ) slip = p - cp;
 						break;
 					}
 				}
@@ -396,6 +399,7 @@ bool exitNow( string sym, int tkt, double lots, double p ) {
 				"CLOSE time = " + TimeToStr( ct ) + "\n" +
 				"COMMISSION charged = " + D( comm, 2 ) + "\n" +
 				"SWAP charges = " + D( swap, 2 ) + "\n" +
+				"SLIPPAGE = " + D( slip ) + "\n" +
 				"\n" +
 				"OPEN price = " + D( op ) + "\n" +
 				"OPEN time = " + TimeToStr( ot ) + "\n" +
@@ -404,7 +408,15 @@ bool exitNow( string sym, int tkt, double lots, double p ) {
 			);
 			return( true );
 		}
+	} else {
+		// alert at the failure of closing the trade
+		SendMail("ERR EXIT of " + d + " for " + sym, 
+			"ERR = " + GetLastError() + "\n" +
+			"ALERT price = " + D( p ) + "\n" +
+			"CLOSE price = " + D( cp ) + "\n" +
+			"CLOSE time = " + TimeToStr( ct ) + "\n" +
+			"\n" +
+		);
 	}
-	// if this has failed return false
 	return( false );
 }
